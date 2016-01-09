@@ -1,0 +1,402 @@
+﻿		     +--------------------------+
+       	     |		CS 5600	         	|
+		     | PROJECT 2: USER PROGRAMS	|
+		     | 	   DESIGN DOCUMENT     	|
+		     +--------------------------+
+
+---- GROUP ----
+
+>> Fill in the names and email addresses of your group members.
+
+Yang Song <songy23@ccs.neu.edu>
+Xiao Tang <xiaotang@ccs.neu.edu>
+Zhibo Liu <zhiboliu@ccs.neu.edu>
+
+---- PRELIMINARIES ----
+
+>> If you have any preliminary comments on your submission, notes for the
+>> TAs, or extra credit, please give them here.
+
+>> Please cite any offline or online sources you consulted while
+>> preparing your submission, other than the Pintos documentation, course
+>> text, lecture notes, and course staff.
+
+			   ARGUMENT PASSING
+			   ================
+
+---- DATA STRUCTURES ----
+
+>> A1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+
+We don't define any new struct or struct nmember here for argument passing.
+
+---- ALGORITHMS ----
+
+>> A2: Briefly describe how you implemented argument parsing.  How do
+>> you arrange for the elements of argv[] to be in the right order?
+>> How do you avoid overflowing the stack page?
+
+In the process_execute(), we make a copy of FILE_NAME to avoid race between the caller and load(). 
+Then we use strtok_r to tokenize the input file name string, and then we call thread_create() to create 
+a new thread which executes the given file. We pass the file name into the method. 
+In addition, thread_create() method call another function start_process() which reads the 
+file name and all arguments from the char array, and save all arguments sequentially in stack. 
+
+1. First, we create another array to store the arguments and tokenize the arguments in order.
+
+  char **arguments = (char **) malloc (arguments_length * sizeof(char));
+  int argc = 0;
+  arguments[argc++] = exec_file_name;
+  
+  arguments_length = strlen (exec_file_name) + 1;
+  while((token = strtok_r(NULL, " ", &remaining))) {
+    arguments_length += strlen (token) + 1;
+    arguments[argc++] = token;
+  }
+
+  int **addrs = (int **) malloc (argc * sizeof(int *));
+  
+2. Second, because the stack grows downward, we create another array addrs to put the arguments in stack 
+   in reverse order of the string. Then the elements of argv[] in stack is right order.
+   
+  int i;
+  for (i = argc - 1; i >= 0; i--) {
+    int arg_length = strlen(arguments[i])+1;
+    if_.esp -= arg_length;
+    addrs[i] = if_.esp;
+    memcpy (if_.esp, arguments[i], arg_length);
+  }
+  if (arguments_length % 4 == 0) {
+    if_.esp -= 0;
+  } else {
+    if_.esp -=4 - arguments_length % 4;
+  }
+
+  /* Push 0 sentinel argument. */
+  if_.esp -= 4;
+  *(int *) if_.esp = 0;
+  for (i = argc - 1; i >= 0; i--) {
+    if_.esp -= 4;
+    *(void **) (if_.esp) = addrs[i];
+  }
+
+3. If load() fails, we will return the state the current thread and printf the error information, 
+   then exit.
+   
+  cur = thread_current ();
+  success = load (exec_file_name, &if_.eip, &if_.esp);
+  if (success) {
+    struct file * file = filesys_open (exec_file_name);
+  } else {
+    /* If load failed, quit. */
+    palloc_free_page (file_name);
+    cur->return_value = -1;
+    printf ("%s: exit(%d)\n", cur->name, -1);
+    thread_exit ();
+  }
+
+			     SYSTEM CALLS
+			     ============
+
+---- DATA STRUCTURES ----
+
+>> B1: Copy here the declaration of each new or changed `struct' or
+>> `struct' member, global or static variable, `typedef', or
+>> enumeration.  Identify the purpose of each in 25 words or less.
+
+We add a few new fields into the thread struct:
+
+struct thread
+{
+ ......
+  
+ int return_value;                   /* Return status of this process 
+                                        when exits. */
+ struct list fd_list;                /* List of file descriptors of this 
+                                        thread. */
+ struct list child_list;             /* List of child threads of this 
+                                         thread. */
+ struct list child_ret_list;         /* List used to store the return values */
+ bool being_waited;                  /* Indicate whether this thread is 
+                                        being waited by parent thread. */
+ int current_fd;                     /* Current value of file descriptor to 
+                                        assign to new open file. */
+ struct semaphore sema_exec;         /* Semaphore for waiting to load child 
+                                        thread when calling exec. */
+ struct semaphore sema_wait;         /* Semaphore used when this thread is 
+                                        waiting for its child thread. */
+ struct thread *parent;              /* Parent thread of this thread. */
+ struct list_elem child_elem;        /* List element for child list. */
+}
+ 
+In addtion, we defined two new structs to help manage file descriptor and 
+retrieve return value from child processes:
+
+/* Associate file with file descriptor and list_elem */
+struct fd_list_node
+{
+  int fd;
+  struct file *file;
+  struct list_elem elem;
+};
+
+/* List node with tid and return_value, used for retrieving 
+   return_value from child threads */
+struct child_return_val
+{
+  tid_t tid;
+  int return_value;
+  struct list_elem elem;
+};
+
+//- How did you ensure a file system synchronization?
+
+
+>> B2: Describe how file descriptors are associated with open files.
+>> Are file descriptors unique within the entire OS or just within a
+>> single process?
+
+First of all, we add a field current_fd in struct thread to keep track
+of the next file descriptor to be assigned, and we also store a 
+fd_list_node (i.e, the new struct used to store file descriptor - file pairs) 
+list in thread struct. 
+
+Initially current_fd is 2, since 0 and 1 are reserved for STDIN_FILENO and 
+STDOUT_FILENO. Every time when one process opens a new file, we will create a new
+fd_list_node, and assign the current_fd and a pointer to the new file to it.
+Then we will increment current_fd by 1, therefore each time when we open a new 
+file, it will have a unique file descriptor. In addition, when one process wants
+to close a file, if the file descriptor of that file is equal to current_fd - 1
+(which means that file has the largest fd), we will reuse that file descriptor.
+But other smaller file descriptors will never be used again.
+
+In our implementation, file descriptors are unique within each single process rather
+than the whole OS, so different processes could have same file descriptors.
+
+---- ALGORITHMS ----
+
+>> B3: Describe your code for reading and writing user data from the
+>> kernel.
+
+Pintos utilizes virtual address to manage physical address. In our design, 
+based on virtual and physical address relationship, we will check if the
+user level memory is valid before we dereference it.
+
+Next, we would check if the address given by user is valid.
+We will assure that the user virtual address is below PHYS_BASE, and the 
+particular page is mapped for each page within the memory that can be accessed 
+from the address given by the user. The purpose is to make sure the system make 
+calls to all conditions needed to successfully complete the data transfer jobs. 
+If anything bad happens, the page fault will appear.
+
+Last, we will handle the situation where the file I/O is requested. We will use
+the file descriptor to find the file structure from the fd_list 
+located in the thread structure. 
+
+In addition, system calls are protected by a lock filesys_lock to avoid
+racing conditions. 
+
+>> B4: Suppose a system call causes a full page (4,096 bytes) of data
+>> to be copied from user space into the kernel.  What is the least
+>> and the greatest possible number of inspections of the page table
+>> (e.g. calls to pagedir_get_page()) that might result?  What about
+>> for a system call that only copies 2 bytes of data?  Is there room
+>> for improvement in these numbers, and how much?
+
+In our design, if a system call causes a full page (4,096 bytes) of data to 
+be copied from user space into the kernel, the least and the greatest possible 
+number of inspections of the page table that might result is 1 or 2 depending 
+on whether data is located on separate pages. We use pagedir_get_page to check 
+the page. We will check it two times when data are in two pages and once when 
+data is in the same page.
+
+Copying data is similar to the above situation. The less pages the data lives, 
+the less time we check the pages. 
+
+Instead of checking the address of read and write, we can keep the operations 
+running until the page fault appears. At this moment, we can handle it appropriately. 
+If the address is fine, we do not need to inspect it. If reading 2 bytes of data 
+happens very often, we could save a lot of time without using pagedir_get_page method.  
+
+>> B5: Briefly describe your implementation of the "wait" system call
+>> and how it interacts with process termination.
+
+First of all, each time when a process terminates (in process_exit()), we will check 
+to see if that process has a parent. If so, we will create a new child_return_val that
+contains the tid and return value of this thread, and push it to parent's child_ret_list.
+By doing that we store the return value of child process to its parent process
+when it terminates. Finally, the child process will call sema_up on its parent's
+semaphore sema_wait to unblock parent process.
+
+In our implementation, a wait syscall will first be dispatched by exec_handler() to sys_wait(). 
+In sys_wait() we will first check the tid. If tid is -1, just return -1; otherwise 
+call process_wait().
+
+In process_wait(), we will first traverse the child_list of current thread and
+look for the child thread that matches the given tid. 
+
+If we cannot find such a child, there could be two cases: 1. the child is already dead, 
+and 2. there is no such child of current thread. We deal with both cases by calling 
+retrieve_child_ret(). In retrieve_child_ret(), we go through the child_ret_list of 
+current thread. If there's no such a child, that function will return -1, othrewise 
+the child thread must have already saved its return value, and we will find it in the 
+child_ret_list and return it.
+
+If we could find a child thread in child_list, we will first check to see if it has 
+already been waited. If so, return with -1 since one thread cannot be waited twice.
+Otherwise, set the being_waited field of child thread to true and call sema_down()
+on current (parent) thread so that current thread will be blocked to wait for the child
+thread to complete. Once the child thread finishes running and exits, it will unblock
+the parent thread by calling sema_up in process_exit(), and once the parent thread
+resumes to running state, it will continue to retrieve the return value of child thread
+by calling retrieve_child_ret(), and finally return that return value.
+
+
+---- SYNCHRONIZATION ----
+
+>> B7: The "exec" system call returns -1 if loading the new executable
+>> fails, so it cannot return before the new executable has completed
+>> loading.  How does your code ensure this?  How is the load
+>> success/failure status passed back to the thread that calls "exec"?
+
+In our implementation, an exec syscall will first be dispatched by
+exec_handler() to sys_exec(). In sys_exec() we will first check the 
+file name. If the file name contains invalid address, sys_exec() will 
+exit with -1; if file name is NULL, just return -1 (f->eax = -1). Otherwise
+call process_execute() and creates a new thread (through thread_create())
+and thus run the new executable (by calling start_process()).
+
+We use another semaphore, sema_exec in thread struct, to make sure that 
+parent process (the one that calls thread_create()) will return only after 
+the child process has finished load(). When the parent thread calls 
+process_execute(), instead of immediately return, it should call sema_down()
+on its sema_exec to block itself so as to wait until the child process finishes
+loading. After load() completes, the child process will call sema_up() on its 
+parent's sema_exec to unblock its parent thread. If load() fails, the child 
+thread will just exit with -1, and process_execute() will also return TID_ERROR
+for the parent thread. If load() successes, child thread will be added to the run
+queue, and process_execute() will return the tid of child thread.
+
+>> B8: Consider parent process P with child process C.  How do you
+>> ensure proper synchronization and avoid race conditions when P
+>> calls wait(C) before C exits?  After C exits?  How do you ensure
+>> that all resources are freed in each case?  How about when P
+>> terminates without waiting, before C exits?  After C exits?  Are
+>> there any special cases?
+
+The underlying principles of wait() are stated in question B5.
+Generally speaking, We use a semaphore sema_wait in thread struct
+to ensure proper synchronization and avoid race conditions. 
+For the scenarios described in this question:
+
+1. If P calls wait(C) before C exits, in process_wait() we will set the 
+being_waited field of C to true (to indicate that C is already waited), and 
+then call sema_down on P's sema_wait so that P will be blocked. When C completes
+and exits, C will call sema_up on P's sema_wait so that P will be unblocked,
+and also save its return value and tid to P's child_ret_list, and removes itself
+from P's child_list. When P resumes from blocking state and continues running, 
+it will retrieve C's return value by traversing its child_ret_list.
+
+2. If P calls wait(C) after C exits, P cannot find C in its child_list since 
+C is already dead and removes itself from P's child_list. Then P will look up
+C's return value from its child_ret_list, and return that value.
+
+3. If P terminates without waiting, before C exits, P will free all its resources
+including the child_ret_list and child_list, and set C's parent to NULL. Therefore
+C and other children of P becomes orphans, and P and C will not have any communication
+after that.
+
+4. If P terminates without waiting, after C exits, C has already stored its return value
+in P's child_ret_list when it exits, but P never use C's return value. When P exits,
+it just frees its child_ret_list without even using C's return value.
+
+In the above cases, when one thread exits, in process_exit() it will free
+all the fd_list_node in its fd_list and child_return_val in its child_ret_list.
+If this thread has a parent, it will remove itself from parent's child_list.
+All the other components like current_fd, sema_exec and sema_wait will automatically
+be destroyed along with the thread, so all resources are freed under all the cases.
+
+
+---- RATIONALE ----
+
+>> B9: Why did you choose to implement access to user memory from the
+>> kernel in the way that you did?
+
+We use the first method taken from 3.1.5. As it is the simplest way to handle 
+the user memory, we would like to take advantage of that simplicity. We use 
+the function named validate_pointer to check if the given pointer is not a 
+valid user pointer or points to unmapped memory. If the address is not a user 
+virtual address, is below 0x08048000 (user address bottom) or is not the kernel 
+virtual address corresponding to that physical address, it will exit.
+
+We also use validate_buffer and validate_string to check if the given buffer or 
+string contains invalid pointer. If so, the thread exits with -1. 
+
+In addition, we also modified page_fault() in exception.c. If a process tries to 
+access a kernel page or a page owned by other processes, instead of poping up a 
+page_fault exception, it will exit with -1.
+
+Our method can prevent fault from happening. We check the virtual address given
+by the user. In any condition, when that address is not valid, the process will 
+stop instead of getting executed for a while. It saves some time.
+
+
+>> B10: What advantages or disadvantages can you see to your design
+>> for file descriptors?
+
+In general, when we decide the strategy to assign file descriptors,
+we need to make trade-offs between space efficiency and time efficiency.
+Our implementation has good time efficiency, but relatively poor
+space efficiency.
+
+Advantages: O(1) time to assign a new file descriptor. When we open
+a new file, we don't need to do extra work to find a suitable file
+desciptor (e.g go through all the fd list to find an opening), just
+assign the current_fd to the new file. On top of that, we don't preestablish 
+a specified limitation to the number of open files, and the only limitation 
+is that since current_fd is an integer, it cannot be greated that 2 ^ 32 - 1.
+This may be good for some processes who would like to open a lot of files.
+
+Disadvantages: Many file descriptor candidates are wasted, because most
+of the time we don't "garbage collect" the assigned file descriptors.
+In the worst case, if one process keeps opening and closing files for a
+very long time, the current_fd of that process may exceed the upper bound
+of integer. (But that is very unlikely to happen, since most processes 
+won't open so many files.)
+
+>> B11: The default tid_t to pid_t mapping is the identity mapping.
+>> If you changed it, what advantages are there to your approach?
+
+We decide to keep using the default implementation of mapping from 
+tid_t to pid_t. If tid_t is not mapped to pid_t, it will support 
+a process for running multiple threads. However, pintos does 
+not support running multiple threads. As a result, we would like to 
+keep using the default implementation of mapping from tid_t to pid_t.
+
+			   SURVEY QUESTIONS
+			   ================
+
+Answering these questions is optional, but it will help us improve the
+course in future quarters.  Feel free to tell us anything you
+want--these questions are just to spur your thoughts.  You may also
+choose to respond anonymously in the course evaluations at the end of
+the quarter.
+
+>> In your opinion, was this assignment, or any one of the three problems
+>> in it, too easy or too hard?  Did it take too long or too little time?
+
+>> Did you find that working on a particular part of the assignment gave
+>> you greater insight into some aspect of OS design?
+
+Yes, syscall exec and wait.
+
+>> Is there some particular fact or hint we should give students in
+>> future quarters to help them solve the problems?  Conversely, did you
+>> find any of our guidance to be misleading?
+
+>> Do you have any suggestions for the TAs to more effectively assist
+>> students, either for future quarters or the remaining projects?
+
+>> Any other comments?
